@@ -65,11 +65,14 @@ class VecDB:
         with open("ivf_lists.json", "r") as f:
             inverted_lists = json.load(f)
         inverted_lists = {int(k): v for k, v in inverted_lists.items()}
-        dists = 1- self._cal_score(centroids,query)
+        dists = []
+        for c in centroids:
+            dists.append(1 - self._cal_score(c, query))
+        dists = np.array(dists)
         nprobe = 3
         closest = np.argsort(dists)[:nprobe] # those are the closest nprobs clusters
-        for cid in centroids[closest]:
-            for row_num in range(num_records):
+        for cid in closest:
+            for row_num in inverted_lists[cid]:
                 vector = self.get_one_row(row_num)
                 score = self._cal_score(query, vector)
                 scores.append((score, row_num))
@@ -85,7 +88,7 @@ class VecDB:
         cosine_similarity = dot_product / (norm_vec1 * norm_vec2)
         return cosine_similarity
 
-    def kmeans(X, k, intial_centroids: None, max_iters=100):
+    def kmeans(self , X, k, max_iters=100):
         """
         X: data points, shape (n_samples, n_features)
         k: number of clusters
@@ -94,8 +97,8 @@ class VecDB:
         
         # 1. Randomly initialize cluster centroids
         #np.random.seed(42)
-        #random_indices = np.random.choice(len(X), k, replace=False)
-        #centroids = X[random_indices]
+        random_indices = np.random.choice(len(X), k, replace=False)
+        centroids = X[random_indices]
 
         for _ in range(max_iters):
             # 2. Assign points to closest centroid
@@ -119,24 +122,14 @@ class VecDB:
         # Placeholder for index building logic
         rows = self.get_all_rows()
         n_clusters_testing = 2
-        n_clusters = np.sqrt(len(rows))   # just for testing
-        n_probes = np.sqrt(len(rows)//n_clusters) # intial is 66
-        centroids = rows[np.random.choice(rows.shape[0], n_clusters, replace=False)]
+        n_clusters = round(np.sqrt(len(rows))) # just for testing
+        n_probes = round(np.sqrt(len(rows)//n_clusters)) # intial is 66
         max_iters = 10
-        final_centroids, labels = VecDB.kmeans(rows, n_clusters, centroids,max_iters)
+        final_centroids, labels = VecDB.kmeans(rows, n_clusters,max_iters)
         inverted_lists = {i: [] for i in range(n_clusters)}
         for idx, cluster_id in enumerate(labels):
             inverted_lists[cluster_id].append(idx)
         np.save("centroids.npy", final_centroids)
-        np.save("ivf_lists.npz",inverted_lists)
         with open("ivf_lists.json", "w") as f:
             json.dump(inverted_lists, f)
         return final_centroids, inverted_lists
-        
-
-                
-            
-        
-        
-
-
