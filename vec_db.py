@@ -1,6 +1,7 @@
 from typing import Dict, List, Annotated
 import numpy as np
 import os
+import json
 
 DB_SEED_NUMBER = 42
 ELEMENT_SIZE = np.dtype(np.float32).itemsize
@@ -60,15 +61,23 @@ class VecDB:
     def retrieve(self, query: Annotated[np.ndarray, (1, DIMENSION)], top_k = 5):
         scores = []
         num_records = self._get_num_records()
-        # here we assume that the row number is the ID of each vector
-        for row_num in range(num_records):
-            vector = self.get_one_row(row_num)
-            score = self._cal_score(query, vector)
-            scores.append((score, row_num))
+        centroids = np.load("centroids.npy")
+        with open("ivf_lists.json", "r") as f:
+            inverted_lists = json.load(f)
+        inverted_lists = {int(k): v for k, v in inverted_lists.items()}
+        dists = 1- self._cal_score(centroids,query)
+        nprobe = 3
+        closest = np.argsort(dists)[:nprobe] # those are the closest nprobs clusters
+        for cid in centroids[closest]:
+            for row_num in range(num_records):
+                vector = self.get_one_row(row_num)
+                score = self._cal_score(query, vector)
+                scores.append((score, row_num))
+
         # here we assume that if two rows have the same score, return the lowest ID
         scores = sorted(scores, reverse=True)[:top_k]
         return [s[1] for s in scores]
-    
+
     def _cal_score(self, vec1, vec2):
         dot_product = np.dot(vec1, vec2)
         norm_vec1 = np.linalg.norm(vec1)
@@ -76,8 +85,58 @@ class VecDB:
         cosine_similarity = dot_product / (norm_vec1 * norm_vec2)
         return cosine_similarity
 
+    def kmeans(X, k, intial_centroids: None, max_iters=100):
+        """
+        X: data points, shape (n_samples, n_features)
+        k: number of clusters
+        max_iters: maximum number of iterations
+        """
+        
+        # 1. Randomly initialize cluster centroids
+        #np.random.seed(42)
+        #random_indices = np.random.choice(len(X), k, replace=False)
+        #centroids = X[random_indices]
+
+        for _ in range(max_iters):
+            # 2. Assign points to closest centroid
+            distances = np.linalg.norm(X[:, None] - centroids[None, :], axis=2)
+            labels = np.argmin(distances, axis=1)
+
+            # 3. Compute new centroids from mean of points
+            new_centroids = np.array([X[labels == i].mean(axis=0) for i in range(k)])
+
+            # 4. Stop if converged (no change)
+            if np.allclose(centroids, new_centroids):
+                break
+            
+            centroids = new_centroids
+
+        return centroids, labels
+
+
+    #clear cash each time get this python line    
     def _build_index(self):
         # Placeholder for index building logic
-        pass
+        rows = self.get_all_rows()
+        n_clusters_testing = 2
+        n_clusters = np.sqrt(len(rows))   # just for testing
+        n_probes = np.sqrt(len(rows)//n_clusters) # intial is 66
+        centroids = rows[np.random.choice(rows.shape[0], n_clusters, replace=False)]
+        max_iters = 10
+        final_centroids, labels = VecDB.kmeans(rows, n_clusters, centroids,max_iters)
+        inverted_lists = {i: [] for i in range(n_clusters)}
+        for idx, cluster_id in enumerate(labels):
+            inverted_lists[cluster_id].append(idx)
+        np.save("centroids.npy", final_centroids)
+        np.save("ivf_lists.npz",inverted_lists)
+        with open("ivf_lists.json", "w") as f:
+            json.dump(inverted_lists, f)
+        return final_centroids, inverted_lists
+        
+
+                
+            
+        
+        
 
 
