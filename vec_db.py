@@ -163,7 +163,7 @@ class VecDB:
             return None, None
 
         # Determine the number of clusters based on the number of records
-        n_clusters = int(np.sqrt(N))
+        n_clusters = 1000
         # Ensure n_clusters is at least 1, and not more than N
         n_clusters = max(1, min(n_clusters, N))
         
