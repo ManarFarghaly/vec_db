@@ -59,28 +59,46 @@ class VecDB:
         return np.array(vectors)
     
     def retrieve(self, query: Annotated[np.ndarray, (1, DIMENSION)], top_k = 5):
-        scores = []
-        num_records = self._get_num_records()
+        query_1d = query.reshape(-1) 
+        
         centroids = np.load("centroids.npy")
         with open("ivf_lists.json", "r") as f:
             inverted_lists = json.load(f)
-        inverted_lists = {int(k): v for k, v in inverted_lists.items()}
-        dists = []
-        for c in centroids:
-            dists.append(1 - self._cal_score(c, query))
-        dists = np.array(dists)
-        nprobe = 3
-        closest = np.argsort(dists)[:nprobe] # those are the closest nprobs clusters
-        for cid in closest:
+        inverted_lists = {int(k): [int(x) for x in v] for k, v in inverted_lists.items()}
+        
+        # Euclidean Distance (L2 norm) for finding closest centroids
+        distances = np.linalg.norm(centroids - query_1d, axis=1) 
+
+        nprobe = 3 # Number of clusters to search
+        # Find the indices of the nprobe closest clusters (smallest distance)
+        closest_cluster_ids = np.argsort(distances)[:nprobe] 
+        
+        scores = []
+        
+        # Loop through the rows in the chosen inverted lists
+        for cid in closest_cluster_ids:
+            # Check if the cluster has any vectors
+            if cid not in inverted_lists:
+                continue
+
             for row_num in inverted_lists[cid]:
+                # Retrieve the actual vector from the database file
                 vector = self.get_one_row(row_num)
-                score = self._cal_score(query, vector)
+                if isinstance(vector, str): # Handle error case from get_one_row
+                    print(f"Skipping row {row_num} due to error: {vector}")
+                    continue
+                    
+                # Calculate the final similarity score (Cosine Similarity)
+                score = self._cal_score(query_1d, vector)
                 scores.append((score, row_num))
 
-        # here we assume that if two rows have the same score, return the lowest ID
-        scores = sorted(scores, reverse=True)[:top_k]
-        return [s[1] for s in scores]
-
+        # Sort by score (descending) then by row_num (ascending) for tie-breaking
+        # Python's sort is stable, but we can be explicit
+        scores.sort(key=lambda x: (-x[0], x[1]))
+        
+        # Return the top_k row indices
+        return [s[1] for s in scores[:top_k]]
+    
     def _cal_score(self, vec1, vec2):
         dot_product = np.dot(vec1, vec2)
         norm_vec1 = np.linalg.norm(vec1)
@@ -88,7 +106,7 @@ class VecDB:
         cosine_similarity = dot_product / (norm_vec1 * norm_vec2)
         return cosine_similarity
 
-    def kmeans(self , X, k, max_iters=100):
+    def kmeans(self , X, k, max_iters=100, batch_size=10000):
         """
         X: data points, shape (n_samples, n_features)
         k: number of clusters
@@ -97,16 +115,34 @@ class VecDB:
         
         # 1. Randomly initialize cluster centroids
         #np.random.seed(42)
-        random_indices = np.random.choice(len(X), k, replace=False)
-        centroids = X[random_indices]
+        n_samples = len(X)
+        labels = np.zeros(n_samples, dtype=int) # Array to store all labels
+        random_indices = np.random.choice(n_samples, k, replace=False)
+        centroids = X[random_indices].copy()
+        labels = np.zeros(n_samples, dtype=int)
 
         for _ in range(max_iters):
-            # 2. Assign points to closest centroid
-            distances = np.linalg.norm(X[:, None] - centroids[None, :], axis=2)
-            labels = np.argmin(distances, axis=1)
+            # 2. Assign points to closest centroid (using batching)
+            # We iterate over the data in batches to calculate and store the labels
+            for i in range(0, n_samples, batch_size):
+                X_batch = X[i:i + batch_size]
+                
+                # Calculate distances for the batch. The intermediate array is now:
+                # (batch_size, k, dimension) which is much smaller.
+                distances_batch = np.linalg.norm(X_batch[:, None] - centroids[None, :], axis=2)
+                
+                # Store the cluster IDs for this batch
+                labels[i:i + batch_size] = np.argmin(distances_batch, axis=1)
 
             # 3. Compute new centroids from mean of points
-            new_centroids = np.array([X[labels == i].mean(axis=0) for i in range(k)])
+            new_centroids = np.zeros_like(centroids)
+           
+            for i in range(k):
+                cluster_points = X[labels == i]
+                if len(cluster_points) > 0:
+                    new_centroids[i] = cluster_points.mean(axis=0)
+                else:
+                    new_centroids[i] = centroids[i] 
 
             # 4. Stop if converged (no change)
             if np.allclose(centroids, new_centroids):
@@ -121,15 +157,26 @@ class VecDB:
     def _build_index(self):
         # Placeholder for index building logic
         rows = self.get_all_rows()
-        n_clusters_testing = 2
-        n_clusters = round(np.sqrt(len(rows))) # just for testing
-        n_probes = round(np.sqrt(len(rows)//n_clusters)) # intial is 66
+        N = len(rows)
+        if N == 0:
+            print("Database is empty, skipping index build.")
+            return None, None
+
+        # Determine the number of clusters based on the number of records
+        n_clusters = int(np.sqrt(N))
+        # Ensure n_clusters is at least 1, and not more than N
+        n_clusters = max(1, min(n_clusters, N))
+        
         max_iters = 10
-        final_centroids, labels = VecDB.kmeans(rows, n_clusters,max_iters)
+        final_centroids, labels = self.kmeans(rows, n_clusters, max_iters=max_iters)
+        
         inverted_lists = {i: [] for i in range(n_clusters)}
         for idx, cluster_id in enumerate(labels):
             inverted_lists[cluster_id].append(idx)
+            
         np.save("centroids.npy", final_centroids)
         with open("ivf_lists.json", "w") as f:
             json.dump(inverted_lists, f)
+            
+        # The return value should also reflect the actual computed cluster count
         return final_centroids, inverted_lists
