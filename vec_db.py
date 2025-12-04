@@ -1,182 +1,244 @@
-from typing import Dict, List, Annotated
 import numpy as np
 import os
-import json
+import struct
+from sklearn.cluster import MiniBatchKMeans
+from typing import Annotated
 
+# Constants
+DIMENSION = 64
+ELEMENT_SIZE = 4  # float32 is 4 bytes
 DB_SEED_NUMBER = 42
-ELEMENT_SIZE = np.dtype(np.float32).itemsize
-DIMENSION = 70
 
 class VecDB:
-    def __init__(self, database_file_path = "saved_db.dat", index_file_path = "index.dat", new_db = True, db_size = None) -> None:
+    # -------------------------------------------------------------------------
+    # 1. STRICT INIT SIGNATURE (Do not change this)
+    # -------------------------------------------------------------------------
+    def __init__(self, database_file_path="saved_db.dat", index_file_path="index.dat",
+                 new_db=True, db_size=None) -> None:
         self.db_path = database_file_path
         self.index_path = index_file_path
+
         if new_db:
             if db_size is None:
                 raise ValueError("You need to provide the size of the database")
-            # delete the old DB file if exists
-            if os.path.exists(self.db_path):
-                os.remove(self.db_path)
+
+            # Clean up old files
+            if os.path.exists(self.db_path): os.remove(self.db_path)
+            if os.path.exists(self.index_path): os.remove(self.index_path)
+
             self.generate_database(db_size)
-    
-    def generate_database(self, size: int) -> None:
-        rng = np.random.default_rng(DB_SEED_NUMBER)
-        vectors = rng.random((size, DIMENSION), dtype=np.float32)
-        self._write_vectors_to_file(vectors)
-        self._build_index()
+        else:
+            # If we are loading an existing DB but the index is missing, build it.
+            if os.path.exists(self.db_path) and not os.path.exists(self.index_path):
+                print("[INIT] Database found but Index missing. Building Index...")
+                self._build_index()
 
-    def _write_vectors_to_file(self, vectors: np.ndarray) -> None:
-        mmap_vectors = np.memmap(self.db_path, dtype=np.float32, mode='w+', shape=vectors.shape)
-        mmap_vectors[:] = vectors[:]
-        mmap_vectors.flush()
-
-    def _get_num_records(self) -> int:
-        return os.path.getsize(self.db_path) // (DIMENSION * ELEMENT_SIZE)
-
-    def insert_records(self, rows: Annotated[np.ndarray, (int, 70)]):
-        num_old_records = self._get_num_records()
-        num_new_records = len(rows)
-        full_shape = (num_old_records + num_new_records, DIMENSION)
-        mmap_vectors = np.memmap(self.db_path, dtype=np.float32, mode='r+', shape=full_shape)
-        mmap_vectors[num_old_records:] = rows
-        mmap_vectors.flush()
-        #TODO: might change to call insert in the index, if you need
-        self._build_index()
-
+    # -------------------------------------------------------------------------
+    # 2. FILE OPERATIONS
+    # -------------------------------------------------------------------------
     def get_one_row(self, row_num: int) -> np.ndarray:
-        # This function is only load one row in memory
         try:
             offset = row_num * DIMENSION * ELEMENT_SIZE
-            mmap_vector = np.memmap(self.db_path, dtype=np.float32, mode='r', shape=(1, DIMENSION), offset=offset)
+            mmap_vector = np.memmap(self.db_path, dtype=np.float32, mode='r',
+                                    shape=(1, DIMENSION), offset=offset)
             return np.array(mmap_vector[0])
         except Exception as e:
-            return f"An error occurred: {e}"
+            return np.zeros(DIMENSION)
 
     def get_all_rows(self) -> np.ndarray:
-        # Take care this load all the data in memory
         num_records = self._get_num_records()
         vectors = np.memmap(self.db_path, dtype=np.float32, mode='r', shape=(num_records, DIMENSION))
         return np.array(vectors)
-    
-    def retrieve(self, query: Annotated[np.ndarray, (1, DIMENSION)], top_k = 5):
-        query_1d = query.reshape(-1) 
-        
-        centroids = np.load("centroids.npy")
-        with open("ivf_lists.json", "r") as f:
-            inverted_lists = json.load(f)
-        inverted_lists = {int(k): [int(x) for x in v] for k, v in inverted_lists.items()}
-        
-        # Euclidean Distance (L2 norm) for finding closest centroids
-        distances = np.linalg.norm(centroids - query_1d, axis=1) 
 
-        nprobe = 3 # Number of clusters to search
-        # Find the indices of the nprobe closest clusters (smallest distance)
-        closest_cluster_ids = np.argsort(distances)[:nprobe] 
-        
-        scores = []
-        
-        # Loop through the rows in the chosen inverted lists
-        for cid in closest_cluster_ids:
-            # Check if the cluster has any vectors
-            if cid not in inverted_lists:
-                continue
+    def _get_num_records(self) -> int:
+        if not os.path.exists(self.db_path): return 0
+        return os.path.getsize(self.db_path) // (DIMENSION * ELEMENT_SIZE)
 
-            for row_num in inverted_lists[cid]:
-                # Retrieve the actual vector from the database file
-                vector = self.get_one_row(row_num)
-                if isinstance(vector, str): # Handle error case from get_one_row
-                    print(f"Skipping row {row_num} due to error: {vector}")
-                    continue
-                    
-                # Calculate the final similarity score (Cosine Similarity)
-                score = self._cal_score(query_1d, vector)
-                scores.append((score, row_num))
+    # -------------------------------------------------------------------------
+    # 3. GENERATION & INDEXING
+    # -------------------------------------------------------------------------
+    def generate_database(self, size: int) -> None:
+        print(f"[DB] Generating {size} vectors...")
+        rng = np.random.default_rng(DB_SEED_NUMBER)
 
-        # Sort by score (descending) then by row_num (ascending) for tie-breaking
-        # Python's sort is stable, but we can be explicit
-        scores.sort(key=lambda x: (-x[0], x[1]))
-        
-        # Return the top_k row indices
-        return [s[1] for s in scores[:top_k]]
-    
-    def _cal_score(self, vec1, vec2):
-        dot_product = np.dot(vec1, vec2)
-        norm_vec1 = np.linalg.norm(vec1)
-        norm_vec2 = np.linalg.norm(vec2)
-        cosine_similarity = dot_product / (norm_vec1 * norm_vec2)
-        return cosine_similarity
+        mmap_vectors = np.memmap(self.db_path, dtype=np.float32, mode='w+', shape=(size, DIMENSION))
 
-    def kmeans(self , X, k, max_iters=100, batch_size=10000):
-        """
-        X: data points, shape (n_samples, n_features)
-        k: number of clusters
-        max_iters: maximum number of iterations
-        """
-        
-        # 1. Randomly initialize cluster centroids
-        #np.random.seed(42)
-        n_samples = len(X)
-        labels = np.zeros(n_samples, dtype=int) # Array to store all labels
-        random_indices = np.random.choice(n_samples, k, replace=False)
-        centroids = X[random_indices].copy()
-        labels = np.zeros(n_samples, dtype=int)
+        chunk_size = 500_000
+        for i in range(0, size, chunk_size):
+            end = min(i + chunk_size, size)
+            mmap_vectors[i:end] = rng.random((end - i, DIMENSION), dtype=np.float32)
+            if i % 1_000_000 == 0: mmap_vectors.flush()
 
-        for _ in range(max_iters):
-            # 2. Assign points to closest centroid (using batching)
-            # We iterate over the data in batches to calculate and store the labels
-            for i in range(0, n_samples, batch_size):
-                X_batch = X[i:i + batch_size]
-                
-                # Calculate distances for the batch. The intermediate array is now:
-                # (batch_size, k, dimension) which is much smaller.
-                distances_batch = np.linalg.norm(X_batch[:, None] - centroids[None, :], axis=2)
-                
-                # Store the cluster IDs for this batch
-                labels[i:i + batch_size] = np.argmin(distances_batch, axis=1)
+        mmap_vectors.flush()
+        print("[DB] Generation complete.")
+        self._build_index()
 
-            # 3. Compute new centroids from mean of points
-            new_centroids = np.zeros_like(centroids)
-           
-            for i in range(k):
-                cluster_points = X[labels == i]
-                if len(cluster_points) > 0:
-                    new_centroids[i] = cluster_points.mean(axis=0)
-                else:
-                    new_centroids[i] = centroids[i] 
-
-            # 4. Stop if converged (no change)
-            if np.allclose(centroids, new_centroids):
-                break
-            
-            centroids = new_centroids
-
-        return centroids, labels
-
-
-    #clear cash each time get this python line    
     def _build_index(self):
-        # Placeholder for index building logic
-        rows = self.get_all_rows()
-        N = len(rows)
-        if N == 0:
-            print("Database is empty, skipping index build.")
-            return None, None
+        num_records = self._get_num_records()
+        print(f"[INDEX] Building Single-File Index for {num_records} vectors...")
 
-        # Determine the number of clusters based on the number of records
-        n_clusters = 1000
-        # Ensure n_clusters is at least 1, and not more than N
-        n_clusters = max(1, min(n_clusters, N))
-        
-        max_iters = 10
-        final_centroids, labels = self.kmeans(rows, n_clusters, max_iters=max_iters)
-        
-        inverted_lists = {i: [] for i in range(n_clusters)}
-        for idx, cluster_id in enumerate(labels):
-            inverted_lists[cluster_id].append(idx)
+        # A. Determine clusters
+        if num_records <= 1_000_000: n_clusters = 1000
+        elif num_records <= 10_000_000: n_clusters = 3500
+        else: n_clusters = 5000
+
+        # B. Train K-Means (Subsampling)
+        print("[INDEX] Training K-Means...")
+        mmap_vectors = np.memmap(self.db_path, dtype=np.float32, mode='r', shape=(num_records, DIMENSION))
+
+        kmeans = MiniBatchKMeans(n_clusters=n_clusters, batch_size=10000,
+                                 random_state=DB_SEED_NUMBER, n_init='auto')
+
+        train_size = min(500_000, num_records)
+        kmeans.fit(mmap_vectors[:train_size])
+
+        centroids = kmeans.cluster_centers_.astype(np.float32)
+
+        # C. Assign Vectors
+        print("[INDEX] Assigning vectors...")
+        batch_size = 100000
+        all_labels = np.zeros(num_records, dtype=np.int32)
+
+        for i in range(0, num_records, batch_size):
+            end = min(i + batch_size, num_records)
+            all_labels[i:end] = kmeans.predict(mmap_vectors[i:end])
+
+        # D. Sort IDs
+        print("[INDEX] Sorting lists...")
+        sorted_indices = np.argsort(all_labels)
+        sorted_labels = all_labels[sorted_indices]
+
+        # E. WRITE SINGLE INDEX FILE
+        # Format:
+        # [N_Clusters (int)]
+        # [Centroids (N*Dim floats)]
+        # [Offset_Table (N*2 ints -> start_byte, count)]
+        # [Inverted Lists (Integers...)]
+
+        print(f"[INDEX] Writing to {self.index_path}...")
+        with open(self.index_path, "wb") as f:
+            # 1. Write Header: Number of Clusters
+            f.write(struct.pack("I", n_clusters))
+
+            # 2. Write Centroids
+            f.write(centroids.tobytes())
+
+            # 3. Reserve space for Offset Table
+            # Each entry is 2 ints (start_offset, count) -> 8 bytes
+            table_offset_start = f.tell()
+            f.write(b'\0' * (n_clusters * 8))
+
+            # 4. Write Inverted Lists & Record Offsets
+            cluster_metadata = [] # Stores (offset, count)
+
+            for cid in range(n_clusters):
+                # Find range in sorted array
+                start_idx = np.searchsorted(sorted_labels, cid, side='left')
+                end_idx = np.searchsorted(sorted_labels, cid, side='right')
+
+                count = end_idx - start_idx
+                current_file_pos = f.tell()
+
+                # Store metadata (Where this list starts, How many items)
+                cluster_metadata.append((current_file_pos, count))
+
+                if count > 0:
+                    ids = sorted_indices[start_idx:end_idx].astype(np.int32)
+                    f.write(ids.tobytes())
+
+            # 5. Go back and fill in the Offset Table
+            f.seek(table_offset_start)
+            for offset, count in cluster_metadata:
+                f.write(struct.pack("II", offset, count))
+
+        print("[INDEX] Done.")
+
+    # -------------------------------------------------------------------------
+    # 4. RETRIEVAL
+    # -------------------------------------------------------------------------
+    def retrieve(self, query: np.ndarray, top_k=5):
+        query = query.reshape(-1).astype(np.float32)  # Flatten to 1D
+        q_norm = np.linalg.norm(query)
+
+        num_records = self._get_num_records()
+        if num_records <= 1_000_000: n_probes = 5
+        else: n_probes = 10
+
+        # --- A. Read Metadata from Index File ---
+        with open(self.index_path, "rb") as f:
+            # 1. Read N Clusters
+            n_clusters = struct.unpack("I", f.read(4))[0]
+
+            # 2. Read Centroids
+            centroid_bytes = f.read(n_clusters * DIMENSION * 4)
+            centroids = np.frombuffer(centroid_bytes, dtype=np.float32).reshape(n_clusters, DIMENSION)
+
+            # 3. Read Offset Table (N * 2 ints)
+            table_bytes = f.read(n_clusters * 8)
+            cluster_table = np.frombuffer(table_bytes, dtype=np.uint32).reshape(n_clusters, 2)
+
+            # --- B. Coarse Search ---
+            c_norms = np.linalg.norm(centroids, axis=1)
+            dists = np.dot(centroids, query)
+            sims = dists / (c_norms * q_norm + 1e-10)
+            closest_clusters = np.argsort(sims)[::-1][:n_probes]
             
-        np.save("centroids.npy", final_centroids)
-        with open("ivf_lists.json", "w") as f:
-            json.dump(inverted_lists, f)
+            # Free centroids memory
+            del centroids, centroid_bytes, c_norms, dists, sims
+
+            # --- C. Fine Search (Memory-Optimized) ---
+            # Use a fixed-size heap to track top-k candidates
+            # Format: list of (score, id) tuples
+            import heapq
+            top_heap = []  # Min-heap of size top_k
             
-        # The return value should also reflect the actual computed cluster count
-        return final_centroids, inverted_lists
+            # Process each cluster
+            for cid in closest_clusters:
+                offset, count = cluster_table[cid]
+                if count == 0: 
+                    continue
+
+                # Read vector IDs for this cluster
+                f.seek(int(offset))
+                ids_bytes = f.read(int(count) * 4)
+                row_ids = np.frombuffer(ids_bytes, dtype=np.int32)
+
+                # Process vectors in small batches to limit memory
+                batch_size = 1000  # ~256KB per batch (1000 * 64 * 4 bytes)
+                
+                for batch_start in range(0, len(row_ids), batch_size):
+                    batch_end = min(batch_start + batch_size, len(row_ids))
+                    batch_ids = row_ids[batch_start:batch_end]
+                    
+                    # Read vectors one-by-one using file seek (no large memmap)
+                    batch_vecs = np.empty((len(batch_ids), DIMENSION), dtype=np.float32)
+                    
+                    with open(self.db_path, "rb") as db_file:
+                        for i, vid in enumerate(batch_ids):
+                            db_file.seek(int(vid) * DIMENSION * ELEMENT_SIZE)
+                            vec_bytes = db_file.read(DIMENSION * ELEMENT_SIZE)
+                            batch_vecs[i] = np.frombuffer(vec_bytes, dtype=np.float32)
+                    
+                    # Compute scores for this batch
+                    vec_norms = np.linalg.norm(batch_vecs, axis=1)
+                    dot_products = np.dot(batch_vecs, query)
+                    batch_scores = dot_products / (vec_norms * q_norm + 1e-10)
+                    
+                    # Update top-k heap
+                    for idx, score in enumerate(batch_scores):
+                        vid = int(batch_ids[idx])
+                        if len(top_heap) < top_k:
+                            heapq.heappush(top_heap, (score, vid))
+                        elif score > top_heap[0][0]:
+                            heapq.heapreplace(top_heap, (score, vid))
+                    
+                    # Free batch memory
+                    del batch_vecs, vec_norms, dot_products, batch_scores
+
+        # --- D. Extract Final Top K (sorted by score descending) ---
+        if len(top_heap) == 0:
+            return []
+        
+        # Sort by score descending
+        top_heap.sort(key=lambda x: x[0], reverse=True)
+        return [vid for score, vid in top_heap]
