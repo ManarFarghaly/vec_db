@@ -79,7 +79,7 @@ class VecDB:
 
         # A. Determine clusters
         if num_records <= 1_000_000: n_clusters = 1000
-        elif num_records <= 10_000_000: n_clusters = 4000
+        elif num_records <= 10_000_000: n_clusters = 4500
         else: n_clusters = 5000
 
         # B. Train K-Means (Subsampling)
