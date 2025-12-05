@@ -157,14 +157,113 @@ class VecDB:
     # -------------------------------------------------------------------------
     # 4. RETRIEVAL
     # -------------------------------------------------------------------------
+    # def retrieve(self, query: np.ndarray, top_k=5):
+    #     query = query.reshape(-1).astype(np.float32)  # Flatten to 1D
+    #     q_norm = np.linalg.norm(query)
+
+    #     num_records = self._get_num_records()
+    #     if num_records <= 1_000_000: n_probes = 5 
+    #     else: n_probes = 8
+
+    #     # --- A. Read Metadata from Index File ---
+    #     with open(self.index_path, "rb") as f:
+    #         # 1. Read N Clusters
+    #         n_clusters = struct.unpack("I", f.read(4))[0]
+
+    #         # 2. Read Centroids
+    #         centroid_bytes = f.read(n_clusters * DIMENSION * 4)
+    #         centroids = np.frombuffer(centroid_bytes, dtype=np.float32).reshape(n_clusters, DIMENSION)
+
+    #         # 3. Read Offset Table (N * 2 ints)
+    #         table_bytes = f.read(n_clusters * 8)
+    #         cluster_table = np.frombuffer(table_bytes, dtype=np.uint32).reshape(n_clusters, 2)
+
+    #         # --- B. Coarse Search ---
+    #         # c_norms = np.linalg.norm(centroids, axis=1)
+    #         c_norms = np.linalg.norm(centroids, axis=1).astype(np.float32)
+
+    #         dists = np.dot(centroids, query)
+    #         sims = dists / (c_norms * q_norm + 1e-10)
+    #         closest_clusters = np.argsort(sims)[::-1][:n_probes]
+            
+    #         # Free centroids memory
+    #         del centroids, centroid_bytes, c_norms, dists, sims
+
+    #         # --- C. Fine Search (Memory-Optimized) ---
+    #         # Use a fixed-size heap to track top-k candidates
+    #         # Format: list of (score, id) tuples
+    #         import heapq
+    #         top_heap = []  # Min-heap of size top_k
+            
+    #         # Process each cluster
+    #         for cid in closest_clusters:
+    #             offset, count = cluster_table[cid]
+    #             if count == 0: 
+    #                 continue
+
+    #             # Read vector IDs for this cluster
+    #             f.seek(int(offset))
+    #             ids_bytes = f.read(int(count) * 4)
+    #             row_ids = np.frombuffer(ids_bytes, dtype=np.int32)
+
+    #             # Process vectors in small batches to limit memory
+    #             batch_size = 1000  # ~256KB per batch (1000 * 64 * 4 bytes)
+                
+    #             for batch_start in range(0, len(row_ids), batch_size):
+    #                 batch_end = min(batch_start + batch_size, len(row_ids))
+    #                 batch_ids = row_ids[batch_start:batch_end]
+                    
+    #                 # Read vectors one-by-one using file seek (no large memmap)
+    #                 batch_vecs = np.empty((len(batch_ids), DIMENSION), dtype=np.float32)
+                    
+    #                 with open(self.db_path, "rb") as db_file:
+    #                     for i, vid in enumerate(batch_ids):
+    #                         db_file.seek(int(vid) * DIMENSION * ELEMENT_SIZE)
+    #                         vec_bytes = db_file.read(DIMENSION * ELEMENT_SIZE)
+    #                         batch_vecs[i] = np.frombuffer(vec_bytes, dtype=np.float32)
+                    
+    #                 # Compute scores for this batch
+    #                 vec_norms = np.linalg.norm(batch_vecs, axis=1)
+    #                 dot_products = np.dot(batch_vecs, query)
+    #                 batch_scores = dot_products / (vec_norms * q_norm + 1e-10)
+                    
+    #                 # Update top-k heap
+    #                 # for idx, score in enumerate(batch_scores):
+    #                 #     vid = int(batch_ids[idx])
+    #                 #     if len(top_heap) < top_k:
+    #                 #         heapq.heappush(top_heap, (score, vid))
+    #                 #     elif score > top_heap[0][0]:
+    #                 #         heapq.heapreplace(top_heap, (score, vid))
+    #                 start = batch_ids[0]
+    #                 end   = batch_ids[-1] + 1
+
+    #                 db_file.seek(start * DIMENSION * ELEMENT_SIZE)
+    #                 block = db_file.read((end - start) * DIMENSION * ELEMENT_SIZE)
+
+    #                 block_vectors = np.frombuffer(block, dtype=np.float32)\
+    #                                 .reshape(-1, DIMENSION)
+
+    #                 batch_vecs = block_vectors
+                    
+    #                 # Free batch memory
+    #                 del batch_vecs, vec_norms, dot_products, batch_scores
+
+    #     # --- D. Extract Final Top K (sorted by score descending) ---
+    #     if len(top_heap) == 0:
+    #         return []
+        
+    #     # Sort by score descending
+    #     top_heap.sort(key=lambda x: x[0], reverse=True)
+    #     return [vid for score, vid in top_heap]
+    
     def retrieve(self, query: np.ndarray, top_k=5):
-        query = query.reshape(-1).astype(np.float32)  # Flatten to 1D
-        q_norm = np.linalg.norm(query)
+        # flatten & typecast
+        query = query.reshape(-1).astype(np.float32)
+        q_norm = np.linalg.norm(query) + 1e-10
 
         num_records = self._get_num_records()
-        if num_records <= 1_000_000: n_probes = 5 
-        else: n_probes = 8
 
+        # We'll determine n_probes after reading n_clusters from index (adaptive)
         # --- A. Read Metadata from Index File ---
         with open(self.index_path, "rb") as f:
             # 1. Read N Clusters
@@ -178,80 +277,103 @@ class VecDB:
             table_bytes = f.read(n_clusters * 8)
             cluster_table = np.frombuffer(table_bytes, dtype=np.uint32).reshape(n_clusters, 2)
 
-            # --- B. Coarse Search ---
-            # c_norms = np.linalg.norm(centroids, axis=1)
-            c_norms = np.linalg.norm(centroids, axis=1).astype(np.float32)
+        # Adaptive probe policy based on cluster count (you can tune multiplier)
+        if num_records <= 1_000_000:
+            n_probes = 5
+        else:
+            n_probes = min(max(5, int(np.sqrt(n_clusters))), 120)  # sqrt(K) is a reasonable start
 
-            dists = np.dot(centroids, query)
-            sims = dists / (c_norms * q_norm + 1e-10)
-            closest_clusters = np.argsort(sims)[::-1][:n_probes]
-            
-            # Free centroids memory
-            del centroids, centroid_bytes, c_norms, dists, sims
+        # --- B. Coarse Search (compute similarity to centroids) ---
+        # compute centroid norms (cheap relative to disk I/O)
+        c_norms = np.linalg.norm(centroids, axis=1).astype(np.float32) + 1e-10
+        dists = np.dot(centroids, query)
+        sims = dists / (c_norms * q_norm)
+        # get top cluster ids (highest similarity)
+        closest_clusters = np.argsort(sims)[::-1][:n_probes]
 
-            # --- C. Fine Search (Memory-Optimized) ---
-            # Use a fixed-size heap to track top-k candidates
-            # Format: list of (score, id) tuples
-            import heapq
-            top_heap = []  # Min-heap of size top_k
-            
-            # Process each cluster
+        # free big temp arrays we no longer need
+        del centroids, centroid_bytes, c_norms, dists, sims
+
+        # --- C. Fine Search (efficient block I/O) ---
+        import heapq
+        top_heap = []  # min-heap (score, vid)
+        # open DB file once per query (not per batch)
+        with open(self.db_path, "rb") as db_file:
+            # For each candidate cluster
             for cid in closest_clusters:
                 offset, count = cluster_table[cid]
-                if count == 0: 
+                if count == 0:
                     continue
 
                 # Read vector IDs for this cluster
-                f.seek(int(offset))
-                ids_bytes = f.read(int(count) * 4)
+                db_file.seek(int(offset))
+                ids_bytes = db_file.read(int(count) * 4)
                 row_ids = np.frombuffer(ids_bytes, dtype=np.int32)
 
-                # Process vectors in small batches to limit memory
-                batch_size = 1000  # ~256KB per batch (1000 * 64 * 4 bytes)
-                
+                # Process in batches of contiguous id ranges to minimize seeks
+                batch_size = 4096  # tuneable; larger means fewer reads but larger memory
                 for batch_start in range(0, len(row_ids), batch_size):
                     batch_end = min(batch_start + batch_size, len(row_ids))
-                    batch_ids = row_ids[batch_start:batch_end]
-                    
-                    # Read vectors one-by-one using file seek (no large memmap)
-                    batch_vecs = np.empty((len(batch_ids), DIMENSION), dtype=np.float32)
-                    
-                    with open(self.db_path, "rb") as db_file:
-                        for i, vid in enumerate(batch_ids):
-                            db_file.seek(int(vid) * DIMENSION * ELEMENT_SIZE)
-                            vec_bytes = db_file.read(DIMENSION * ELEMENT_SIZE)
-                            batch_vecs[i] = np.frombuffer(vec_bytes, dtype=np.float32)
-                    
-                    # Compute scores for this batch
-                    vec_norms = np.linalg.norm(batch_vecs, axis=1)
+                    batch_ids = row_ids[batch_start:batch_end].astype(np.int64)
+
+                    # If empty continue
+                    if batch_ids.size == 0:
+                        continue
+
+                    # Build contiguous runs (start_idx, length) to read each run as one block
+                    runs = []
+                    run_start = int(batch_ids[0])
+                    prev = run_start
+                    for vid in batch_ids[1:]:
+                        vid = int(vid)
+                        if vid == prev + 1:
+                            prev = vid
+                            continue
+                        # end current run at prev
+                        runs.append((run_start, prev))
+                        # start new run
+                        run_start = vid
+                        prev = vid
+                    # append final run
+                    runs.append((run_start, prev))
+
+                    # allocate container for batch vectors
+                    total_vectors = batch_ids.size
+                    batch_vecs = np.empty((total_vectors, DIMENSION), dtype=np.float32)
+
+                    # Fill batch_vecs by reading runs one-by-one (each run is sequential read)
+                    write_pos = 0
+                    for (s_vid, e_vid) in runs:
+                        run_len = e_vid - s_vid + 1
+                        # file offset in bytes
+                        file_offset = int(s_vid) * DIMENSION * ELEMENT_SIZE
+                        db_file.seek(file_offset)
+                        read_bytes = db_file.read(int(run_len) * DIMENSION * ELEMENT_SIZE)
+                        run_vectors = np.frombuffer(read_bytes, dtype=np.float32).reshape(run_len, DIMENSION)
+                        batch_vecs[write_pos:write_pos + run_len] = run_vectors
+                        write_pos += run_len
+
+                    # Compute cosine similarities for the batch
+                    vec_norms = np.linalg.norm(batch_vecs, axis=1) + 1e-10
                     dot_products = np.dot(batch_vecs, query)
-                    batch_scores = dot_products / (vec_norms * q_norm + 1e-10)
-                    
-                    # Update top-k heap
-                    # for idx, score in enumerate(batch_scores):
-                    #     vid = int(batch_ids[idx])
-                    #     if len(top_heap) < top_k:
-                    #         heapq.heappush(top_heap, (score, vid))
-                    #     elif score > top_heap[0][0]:
-                    #         heapq.heapreplace(top_heap, (score, vid))
-                    start = batch_ids[0]
-                    end   = batch_ids[-1] + 1
+                    batch_scores = dot_products / (vec_norms * q_norm)
 
-                    db_file.seek(start * DIMENSION * ELEMENT_SIZE)
-                    block = db_file.read((end - start) * DIMENSION * ELEMENT_SIZE)
+                    # Update heap with scores and corresponding ids
+                    for idx, score in enumerate(batch_scores):
+                        vid = int(batch_ids[idx])
+                        if len(top_heap) < top_k:
+                            heapq.heappush(top_heap, (score, vid))
+                        else:
+                            # only replace if current score better than smallest in heap
+                            if score > top_heap[0][0]:
+                                heapq.heapreplace(top_heap, (score, vid))
 
-                    block_vectors = np.frombuffer(block, dtype=np.float32)\
-                                    .reshape(-1, DIMENSION)
-
-                    batch_vecs = block_vectors
-                    
-                    # Free batch memory
+                    # free temporary arrays for this batch
                     del batch_vecs, vec_norms, dot_products, batch_scores
 
-        # --- D. Extract Final Top K (sorted by score descending) ---
+        # --- D. Return Top K sorted descending by score
         if len(top_heap) == 0:
             return []
-        
-        # Sort by score descending
+
         top_heap.sort(key=lambda x: x[0], reverse=True)
         return [vid for score, vid in top_heap]
