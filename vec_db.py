@@ -520,8 +520,24 @@ class VecDB:
                         batch_scores = dot_products / (vec_norms * q_norm + 1e-10)
                         
                         # Update top-k heap (Heap is very fast)
-                        for idx, score in enumerate(batch_scores):
-                            vid = int(batch_ids[idx])
+                        # for idx, score in enumerate(batch_scores):
+                        #     vid = int(batch_ids[idx])
+                        #     if len(top_heap) < top_k:
+                        #         heapq.heappush(top_heap, (score, vid))
+                        #     elif score > top_heap[0][0]:
+                        #         heapq.heapreplace(top_heap, (score, vid))
+                        # --- FAST TOP-K UPDATE (VECTOR SAFE, GLOBAL IDS PRESERVED) ---
+
+                        # Get top-k indices inside this batch only
+                        if len(batch_scores) > top_k:
+                            top_idx = np.argpartition(batch_scores, -top_k)[-top_k:]
+                        else:
+                            top_idx = np.arange(len(batch_scores))
+
+                        for i in top_idx:
+                            score = float(batch_scores[i])
+                            vid   = int(batch_ids[i])   # ✅ GLOBAL ID — NOT LOCAL
+
                             if len(top_heap) < top_k:
                                 heapq.heappush(top_heap, (score, vid))
                             elif score > top_heap[0][0]:
