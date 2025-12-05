@@ -449,7 +449,7 @@ class VecDB:
                 # Use a larger batch size (e.g., 50k or 100k) to reduce I/O calls
                 # 100k vectors * 128D * 4 bytes/float ~ 50 MB RAM per batch.
                 # This is a controlled increase in RAM usage.
-                batch_size = 20000 
+                batch_size = 50000 
                 
                 for cid in closest_clusters:
                     offset, count = cluster_table[cid]
