@@ -162,8 +162,8 @@ class VecDB:
         q_norm = np.linalg.norm(query)
 
         num_records = self._get_num_records()
-        if num_records <= 1_000_000: n_probes = 5
-        else: n_probes = 5
+        if num_records <= 1_000_000: n_probes = 5 
+        else: n_probes = 7
 
         # --- A. Read Metadata from Index File ---
         with open(self.index_path, "rb") as f:
