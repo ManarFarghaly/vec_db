@@ -612,20 +612,71 @@ class VecDB:
                         batch_end = min(batch_start + batch_size, len(row_ids))
                         batch_ids = row_ids[batch_start:batch_end]
 
-                        start = int(batch_ids[0])
-                        end   = int(batch_ids[-1]) + 1
+                        # start = int(batch_ids[0])
+                        # end   = int(batch_ids[-1]) + 1
 
-                        db_file.seek(start * DIMENSION * ELEMENT_SIZE)
-                        block = db_file.read(
-                            (end - start) * DIMENSION * ELEMENT_SIZE
-                        )
+                        # db_file.seek(start * DIMENSION * ELEMENT_SIZE)
+                        # block = db_file.read(
+                        #     (end - start) * DIMENSION * ELEMENT_SIZE
+                        # )
 
-                        block_vectors = np.frombuffer(
-                            block, dtype=np.float32
-                        ).reshape(-1, DIMENSION)
+                        # block_vectors = np.frombuffer(
+                        #     block, dtype=np.float32
+                        # ).reshape(-1, DIMENSION)
 
-                        local_idx = batch_ids - start
-                        batch_vecs = block_vectors[local_idx]
+                        # local_idx = batch_ids - start
+                        # batch_vecs = block_vectors[local_idx]
+                        # --- SAFE CONTIGUOUS FAST PATH (ONLY IF SORTED) ---
+                        sorted_ids = np.all(batch_ids[1:] > batch_ids[:-1])
+
+                        if sorted_ids:
+                            start = int(batch_ids[0])
+                            end   = int(batch_ids[-1]) + 1
+                            n_vec = end - start
+
+                            if n_vec > 0:
+                                db_file.seek(start * DIMENSION * ELEMENT_SIZE)
+                                block = db_file.read(n_vec * DIMENSION * ELEMENT_SIZE)
+
+                                block_vectors = np.frombuffer(
+                                    block, dtype=np.float32
+                                ).reshape(-1, DIMENSION)
+
+                                local_idx = batch_ids - start
+                                batch_vecs = block_vectors[local_idx]
+
+                            else:
+                                continue
+
+                        else:
+                            # --- FALLBACK: GROUPED RUN READ (ALWAYS SAFE) ---
+                            runs = []
+                            s = int(batch_ids[0])
+                            p = s
+
+                            for vid in batch_ids[1:]:
+                                vid = int(vid)
+                                if vid == p + 1:
+                                    p = vid
+                                else:
+                                    runs.append((s, p))
+                                    s = vid
+                                    p = vid
+                            runs.append((s, p))
+
+                            batch_vecs = np.empty((len(batch_ids), DIMENSION), dtype=np.float32)
+                            write_pos = 0
+
+                            for s_vid, e_vid in runs:
+                                run_len = e_vid - s_vid + 1
+                                db_file.seek(s_vid * DIMENSION * ELEMENT_SIZE)
+
+                                data = db_file.read(run_len * DIMENSION * ELEMENT_SIZE)
+                                vecs = np.frombuffer(data, dtype=np.float32).reshape(run_len, DIMENSION)
+
+                                batch_vecs[write_pos:write_pos + run_len] = vecs
+                                write_pos += run_len
+                        
 
                         vec_norms    = np.linalg.norm(batch_vecs, axis=1)
                         dot_products = np.dot(batch_vecs, query)
