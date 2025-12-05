@@ -1,3 +1,4 @@
+from tracemalloc import start
 import numpy as np
 import os
 import struct
@@ -178,7 +179,9 @@ class VecDB:
             cluster_table = np.frombuffer(table_bytes, dtype=np.uint32).reshape(n_clusters, 2)
 
             # --- B. Coarse Search ---
-            c_norms = np.linalg.norm(centroids, axis=1)
+            # c_norms = np.linalg.norm(centroids, axis=1)
+            c_norms = np.linalg.norm(centroids, axis=1).astype(np.float32)
+
             dists = np.dot(centroids, query)
             sims = dists / (c_norms * q_norm + 1e-10)
             closest_clusters = np.argsort(sims)[::-1][:n_probes]
@@ -225,12 +228,22 @@ class VecDB:
                     batch_scores = dot_products / (vec_norms * q_norm + 1e-10)
                     
                     # Update top-k heap
-                    for idx, score in enumerate(batch_scores):
-                        vid = int(batch_ids[idx])
-                        if len(top_heap) < top_k:
-                            heapq.heappush(top_heap, (score, vid))
-                        elif score > top_heap[0][0]:
-                            heapq.heapreplace(top_heap, (score, vid))
+                    # for idx, score in enumerate(batch_scores):
+                    #     vid = int(batch_ids[idx])
+                    #     if len(top_heap) < top_k:
+                    #         heapq.heappush(top_heap, (score, vid))
+                    #     elif score > top_heap[0][0]:
+                    #         heapq.heapreplace(top_heap, (score, vid))
+                    start = batch_ids[0]
+                    end   = batch_ids[-1] + 1
+
+                    db_file.seek(start * DIMENSION * ELEMENT_SIZE)
+                    block = db_file.read((end - start) * DIMENSION * ELEMENT_SIZE)
+
+                    block_vectors = np.frombuffer(block, dtype=np.float32)\
+                                    .reshape(-1, DIMENSION)
+
+                    batch_vecs = block_vectors
                     
                     # Free batch memory
                     del batch_vecs, vec_norms, dot_products, batch_scores
