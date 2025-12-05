@@ -80,7 +80,7 @@ class VecDB:
 
         # A. Determine clusters
         if num_records <= 1_000_000: n_clusters = 1000
-        elif num_records <= 10_000_000: n_clusters = 3500
+        elif num_records <= 10_000_000: n_clusters = 4000
         else: n_clusters = 5000
 
         # B. Train K-Means (Subsampling)
@@ -163,7 +163,7 @@ class VecDB:
 
         num_records = self._get_num_records()
         if num_records <= 1_000_000: n_probes = 5 
-        else: n_probes = 7
+        else: n_probes = 8
 
         # --- A. Read Metadata from Index File ---
         with open(self.index_path, "rb") as f:
