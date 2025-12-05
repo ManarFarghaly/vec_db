@@ -467,25 +467,53 @@ class VecDB:
                         
                         # Compute the byte offset for the FIRST vector in this batch
                         # Assumes your database file is a flat array of vectors [v0, v1, v2, ...]
-                        first_vid = batch_ids[0]
-                        first_vector_byte_offset = int(first_vid) * DIMENSION * ELEMENT_SIZE
+                        # first_vid = batch_ids[0]
+                        # first_vector_byte_offset = int(first_vid) * DIMENSION * ELEMENT_SIZE
                         
-                        # Compute the total bytes to read for all vectors in this batch
-                        num_vectors_to_read = len(batch_ids)
-                        total_bytes_to_read = num_vectors_to_read * DIMENSION * ELEMENT_SIZE
+                        # # Compute the total bytes to read for all vectors in this batch
+                        # num_vectors_to_read = len(batch_ids)
+                        # total_bytes_to_read = num_vectors_to_read * DIMENSION * ELEMENT_SIZE
                         
-                        # --- DRAMATIC PERFORMANCE BOOST ---
-                        # 2. Seek to the start of the FIRST vector in the batch
-                        db_file.seek(first_vector_byte_offset, os.SEEK_SET)
+                        # # --- DRAMATIC PERFORMANCE BOOST ---
+                        # # 2. Seek to the start of the FIRST vector in the batch
+                        # db_file.seek(first_vector_byte_offset, os.SEEK_SET)
                         
-                        # 3. Read the ENTIRE contiguous block of vectors for the batch
-                        vec_bytes = db_file.read(total_bytes_to_read)
+                        # # 3. Read the ENTIRE contiguous block of vectors for the batch
+                        # vec_bytes = db_file.read(total_bytes_to_read)
                         
-                        # 4. Load the whole batch into RAM at once
-                        batch_vecs = np.frombuffer(vec_bytes, dtype=np.float32).reshape(
-                            num_vectors_to_read, DIMENSION
-                        )
-                        
+                        # # 4. Load the whole batch into RAM at once
+                        # batch_vecs = np.frombuffer(vec_bytes, dtype=np.float32).reshape(
+                        #     num_vectors_to_read, DIMENSION
+                        # )
+                        # --- Build contiguous runs ---
+                        runs = []
+                        run_start = int(batch_ids[0])
+                        prev = run_start
+                        for vid in batch_ids[1:]:
+                            vid = int(vid)
+                            if vid == prev + 1:
+                                prev = vid
+                                continue
+                            runs.append((run_start, prev))
+                            run_start = vid
+                            prev = vid
+                        runs.append((run_start, prev))
+
+                        # Allocate buffer
+                        batch_vecs = np.empty((len(batch_ids), DIMENSION), dtype=np.float32)
+
+                        write_pos = 0
+                        for (s_vid, e_vid) in runs:
+                            run_len = e_vid - s_vid + 1
+                            file_offset = int(s_vid) * DIMENSION * ELEMENT_SIZE
+
+                            db_file.seek(file_offset)
+                            read_bytes = db_file.read(run_len * DIMENSION * ELEMENT_SIZE)
+
+                            run_vectors = np.frombuffer(read_bytes, dtype=np.float32).reshape(run_len, DIMENSION)
+                            batch_vecs[write_pos:write_pos + run_len] = run_vectors
+                            write_pos += run_len
+
                         # Compute scores for this batch (FAST: RAM-based vectorized math)
                         vec_norms = np.linalg.norm(batch_vecs, axis=1)
                         dot_products = np.dot(batch_vecs, query)

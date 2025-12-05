@@ -3,6 +3,7 @@ from dataclasses import dataclass
 import numpy as np
 import time
 from vec_db import VecDB
+
 def run_queries_safe(db, top_k, num_runs):
     """
     Calculates Ground Truth in small batches.
