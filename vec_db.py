@@ -413,82 +413,213 @@ class VecDB:
     # -------------------------------------------------------------------------
     # 4. RETRIEVAL
     # -------------------------------------------------------------------------
+    # def retrieve(self, query: np.ndarray, top_k=5):
+    #     query = query.reshape(-1).astype(np.float32)
+    #     q_norm = np.linalg.norm(query)
+        
+    #     num_records = self._get_num_records()
+    #     if num_records <= 1_000_000: n_probes = 10
+    #     else: n_probes = 5
+
+    #     # --- A & B. Coarse Search (Metadata + Centroids) ---
+    #     # The reading of the index file (centroids and offsets) is fast 
+    #     # and necessary, and kept outside the main loop.
+    #     with open(self.index_path, "rb") as f:
+    #         n_clusters = struct.unpack("I", f.read(4))[0]
+    #         centroid_bytes = f.read(n_clusters * DIMENSION * ELEMENT_SIZE)
+    #         centroids = np.frombuffer(centroid_bytes, dtype=np.float32).reshape(n_clusters, DIMENSION)
+    #         table_bytes = f.read(n_clusters * 8)
+    #         cluster_table = np.frombuffer(table_bytes, dtype=np.uint32).reshape(n_clusters, 2)
+            
+    #         c_norms = np.linalg.norm(centroids, axis=1)
+    #         dists = np.dot(centroids, query)
+    #         sims = dists / (c_norms * q_norm + 1e-10)
+    #         closest_clusters = np.argsort(sims)[::-1][:n_probes]
+            
+    #         del centroids, centroid_bytes, c_norms, dists, sims
+
+    #         import heapq
+    #         # --- C. Fine Search (Optimized Batches) ---
+    #         top_heap = [] 
+            
+    #         # 1. ACCELERATION STEP: Open the DB file ONCE
+    #         # This eliminates the overhead of opening/closing the file per batch.
+    #         with open(self.db_path, "rb") as db_file:
+                
+    #             # Use a larger batch size (e.g., 50k or 100k) to reduce I/O calls
+    #             # 100k vectors * 128D * 4 bytes/float ~ 50 MB RAM per batch.
+    #             # This is a controlled increase in RAM usage.
+    #             batch_size = 50000 
+                
+    #             for cid in closest_clusters:
+    #                 offset, count = cluster_table[cid]
+    #                 if count == 0: continue
+
+    #                 # Read vector IDs for this cluster (from index_path file 'f')
+    #                 f.seek(int(offset))
+    #                 ids_bytes = f.read(int(count) * 4)
+    #                 row_ids = np.frombuffer(ids_bytes, dtype=np.int32)
+
+    #                 # Process vectors in optimized batches
+    #                 for batch_start in range(0, len(row_ids), batch_size):
+    #                     batch_end = min(batch_start + batch_size, len(row_ids))
+    #                     batch_ids = row_ids[batch_start:batch_end]
+                        
+    #                     # Compute the byte offset for the FIRST vector in this batch
+    #                     # Assumes your database file is a flat array of vectors [v0, v1, v2, ...]
+    #                     # first_vid = batch_ids[0]
+    #                     # first_vector_byte_offset = int(first_vid) * DIMENSION * ELEMENT_SIZE
+                        
+    #                     # # Compute the total bytes to read for all vectors in this batch
+    #                     # num_vectors_to_read = len(batch_ids)
+    #                     # total_bytes_to_read = num_vectors_to_read * DIMENSION * ELEMENT_SIZE
+                        
+    #                     # # --- DRAMATIC PERFORMANCE BOOST ---
+    #                     # # 2. Seek to the start of the FIRST vector in the batch
+    #                     # db_file.seek(first_vector_byte_offset, os.SEEK_SET)
+                        
+    #                     # # 3. Read the ENTIRE contiguous block of vectors for the batch
+    #                     # vec_bytes = db_file.read(total_bytes_to_read)
+                        
+    #                     # # 4. Load the whole batch into RAM at once
+    #                     # batch_vecs = np.frombuffer(vec_bytes, dtype=np.float32).reshape(
+    #                     #     num_vectors_to_read, DIMENSION
+    #                     # )
+    #                     # --- Build contiguous runs ---
+    #                     runs = []
+    #                     run_start = int(batch_ids[0])
+    #                     prev = run_start
+    #                     for vid in batch_ids[1:]:
+    #                         vid = int(vid)
+    #                         if vid == prev + 1:
+    #                             prev = vid
+    #                             continue
+    #                         runs.append((run_start, prev))
+    #                         run_start = vid
+    #                         prev = vid
+    #                     runs.append((run_start, prev))
+
+    #                     # Allocate buffer
+    #                     batch_vecs = np.empty((len(batch_ids), DIMENSION), dtype=np.float32)
+
+    #                     write_pos = 0
+    #                     for (s_vid, e_vid) in runs:
+    #                         run_len = e_vid - s_vid + 1
+    #                         file_offset = int(s_vid) * DIMENSION * ELEMENT_SIZE
+
+    #                         db_file.seek(file_offset)
+    #                         read_bytes = db_file.read(run_len * DIMENSION * ELEMENT_SIZE)
+
+    #                         run_vectors = np.frombuffer(read_bytes, dtype=np.float32).reshape(run_len, DIMENSION)
+    #                         batch_vecs[write_pos:write_pos + run_len] = run_vectors
+    #                         write_pos += run_len
+
+    #                     # Compute scores for this batch (FAST: RAM-based vectorized math)
+    #                     vec_norms = np.linalg.norm(batch_vecs, axis=1)
+    #                     dot_products = np.dot(batch_vecs, query)
+    #                     batch_scores = dot_products / (vec_norms * q_norm + 1e-10)
+                        
+    #                     # Update top-k heap (Heap is very fast)
+    #                     # for idx, score in enumerate(batch_scores):
+    #                     #     vid = int(batch_ids[idx])
+    #                     #     if len(top_heap) < top_k:
+    #                     #         heapq.heappush(top_heap, (score, vid))
+    #                     #     elif score > top_heap[0][0]:
+    #                     #         heapq.heapreplace(top_heap, (score, vid))
+    #                     # --- FAST TOP-K UPDATE (VECTOR SAFE, GLOBAL IDS PRESERVED) ---
+
+    #                     # Get top-k indices inside this batch only
+    #                     if len(batch_scores) > top_k:
+    #                         top_idx = np.argpartition(batch_scores, -top_k)[-top_k:]
+    #                     else:
+    #                         top_idx = np.arange(len(batch_scores))
+
+    #                     for i in top_idx:
+    #                         score = float(batch_scores[i])
+    #                         vid   = int(batch_ids[i])   # ✅ GLOBAL ID — NOT LOCAL
+
+    #                         if len(top_heap) < top_k:
+    #                             heapq.heappush(top_heap, (score, vid))
+    #                         elif score > top_heap[0][0]:
+    #                             heapq.heapreplace(top_heap, (score, vid))
+                        
+    #                     # Free batch memory
+    #                     del batch_vecs, vec_norms, dot_products, batch_scores
+
+    #         # --- D. Extract Final Top K ---
+    #         if not top_heap: return []
+            
+    #         top_heap.sort(key=lambda x: x[0], reverse=True)
+    #         # return [vid for score, vid in top_heap]
+    #         return [(float(score), int(vid)) for score, vid in top_heap]
     def retrieve(self, query: np.ndarray, top_k=5):
         query = query.reshape(-1).astype(np.float32)
         q_norm = np.linalg.norm(query)
-        
-        num_records = self._get_num_records()
-        if num_records <= 1_000_000: n_probes = 10
-        else: n_probes = 5
-
+            
         # --- A & B. Coarse Search (Metadata + Centroids) ---
-        # The reading of the index file (centroids and offsets) is fast 
-        # and necessary, and kept outside the main loop.
         with open(self.index_path, "rb") as f:
             n_clusters = struct.unpack("I", f.read(4))[0]
+
             centroid_bytes = f.read(n_clusters * DIMENSION * ELEMENT_SIZE)
-            centroids = np.frombuffer(centroid_bytes, dtype=np.float32).reshape(n_clusters, DIMENSION)
+            centroids = np.frombuffer(
+                centroid_bytes, dtype=np.float32
+            ).reshape(n_clusters, DIMENSION)
+
             table_bytes = f.read(n_clusters * 8)
-            cluster_table = np.frombuffer(table_bytes, dtype=np.uint32).reshape(n_clusters, 2)
-            
+            cluster_table = np.frombuffer(
+                table_bytes, dtype=np.uint32
+            ).reshape(n_clusters, 2)
+                
             c_norms = np.linalg.norm(centroids, axis=1)
-            dists = np.dot(centroids, query)
-            sims = dists / (c_norms * q_norm + 1e-10)
-            closest_clusters = np.argsort(sims)[::-1][:n_probes]
-            
+            dists   = np.dot(centroids, query)
+            sims    = dists / (c_norms * q_norm + 1e-10)
+
+            candidate_cids = np.argsort(sims)[::-1]
+
+            # -------- HARD SCAN BUDGET (OPTION A) --------
+            closest_clusters = []
+            total_vectors = 0
+            MAX_SCAN = 250_000
+
+            for cid in candidate_cids:
+                count = int(cluster_table[cid][1])
+                if count == 0:
+                    continue
+                if total_vectors + count > MAX_SCAN:
+                    break
+                closest_clusters.append(cid)
+                total_vectors += count
+
+            if not closest_clusters:
+                closest_clusters = candidate_cids[:1]
+
             del centroids, centroid_bytes, c_norms, dists, sims
 
             import heapq
             # --- C. Fine Search (Optimized Batches) ---
             top_heap = [] 
-            
-            # 1. ACCELERATION STEP: Open the DB file ONCE
-            # This eliminates the overhead of opening/closing the file per batch.
+                
             with open(self.db_path, "rb") as db_file:
-                
-                # Use a larger batch size (e.g., 50k or 100k) to reduce I/O calls
-                # 100k vectors * 128D * 4 bytes/float ~ 50 MB RAM per batch.
-                # This is a controlled increase in RAM usage.
-                batch_size = 50000 
-                
+                batch_size = 50000
+                    
                 for cid in closest_clusters:
                     offset, count = cluster_table[cid]
-                    if count == 0: continue
+                    if count == 0:
+                        continue
 
-                    # Read vector IDs for this cluster (from index_path file 'f')
                     f.seek(int(offset))
                     ids_bytes = f.read(int(count) * 4)
                     row_ids = np.frombuffer(ids_bytes, dtype=np.int32)
 
-                    # Process vectors in optimized batches
                     for batch_start in range(0, len(row_ids), batch_size):
                         batch_end = min(batch_start + batch_size, len(row_ids))
                         batch_ids = row_ids[batch_start:batch_end]
-                        
-                        # Compute the byte offset for the FIRST vector in this batch
-                        # Assumes your database file is a flat array of vectors [v0, v1, v2, ...]
-                        # first_vid = batch_ids[0]
-                        # first_vector_byte_offset = int(first_vid) * DIMENSION * ELEMENT_SIZE
-                        
-                        # # Compute the total bytes to read for all vectors in this batch
-                        # num_vectors_to_read = len(batch_ids)
-                        # total_bytes_to_read = num_vectors_to_read * DIMENSION * ELEMENT_SIZE
-                        
-                        # # --- DRAMATIC PERFORMANCE BOOST ---
-                        # # 2. Seek to the start of the FIRST vector in the batch
-                        # db_file.seek(first_vector_byte_offset, os.SEEK_SET)
-                        
-                        # # 3. Read the ENTIRE contiguous block of vectors for the batch
-                        # vec_bytes = db_file.read(total_bytes_to_read)
-                        
-                        # # 4. Load the whole batch into RAM at once
-                        # batch_vecs = np.frombuffer(vec_bytes, dtype=np.float32).reshape(
-                        #     num_vectors_to_read, DIMENSION
-                        # )
-                        # --- Build contiguous runs ---
+
+                        # ---- Build contiguous runs ----
                         runs = []
                         run_start = int(batch_ids[0])
                         prev = run_start
+
                         for vid in batch_ids[1:]:
                             vid = int(vid)
                             if vid == prev + 1:
@@ -499,8 +630,9 @@ class VecDB:
                             prev = vid
                         runs.append((run_start, prev))
 
-                        # Allocate buffer
-                        batch_vecs = np.empty((len(batch_ids), DIMENSION), dtype=np.float32)
+                        batch_vecs = np.empty(
+                            (len(batch_ids), DIMENSION), dtype=np.float32
+                        )
 
                         write_pos = 0
                         for (s_vid, e_vid) in runs:
@@ -508,46 +640,46 @@ class VecDB:
                             file_offset = int(s_vid) * DIMENSION * ELEMENT_SIZE
 
                             db_file.seek(file_offset)
-                            read_bytes = db_file.read(run_len * DIMENSION * ELEMENT_SIZE)
+                            read_bytes = db_file.read(
+                                run_len * DIMENSION * ELEMENT_SIZE
+                            )
 
-                            run_vectors = np.frombuffer(read_bytes, dtype=np.float32).reshape(run_len, DIMENSION)
-                            batch_vecs[write_pos:write_pos + run_len] = run_vectors
+                            run_vectors = np.frombuffer(
+                                read_bytes, dtype=np.float32
+                            ).reshape(run_len, DIMENSION)
+
+                            batch_vecs[
+                                write_pos:write_pos + run_len
+                            ] = run_vectors
+
                             write_pos += run_len
 
-                        # Compute scores for this batch (FAST: RAM-based vectorized math)
-                        vec_norms = np.linalg.norm(batch_vecs, axis=1)
+                        vec_norms    = np.linalg.norm(batch_vecs, axis=1)
                         dot_products = np.dot(batch_vecs, query)
                         batch_scores = dot_products / (vec_norms * q_norm + 1e-10)
-                        
-                        # Update top-k heap (Heap is very fast)
-                        # for idx, score in enumerate(batch_scores):
-                        #     vid = int(batch_ids[idx])
-                        #     if len(top_heap) < top_k:
-                        #         heapq.heappush(top_heap, (score, vid))
-                        #     elif score > top_heap[0][0]:
-                        #         heapq.heapreplace(top_heap, (score, vid))
-                        # --- FAST TOP-K UPDATE (VECTOR SAFE, GLOBAL IDS PRESERVED) ---
 
-                        # Get top-k indices inside this batch only
+                        # ---- FAST TOP-K UPDATE ----
                         if len(batch_scores) > top_k:
-                            top_idx = np.argpartition(batch_scores, -top_k)[-top_k:]
+                            top_idx = np.argpartition(
+                                batch_scores, -top_k
+                            )[-top_k:]
                         else:
                             top_idx = np.arange(len(batch_scores))
 
                         for i in top_idx:
                             score = float(batch_scores[i])
-                            vid   = int(batch_ids[i])   # ✅ GLOBAL ID — NOT LOCAL
+                            vid   = int(batch_ids[i])
 
                             if len(top_heap) < top_k:
                                 heapq.heappush(top_heap, (score, vid))
                             elif score > top_heap[0][0]:
                                 heapq.heapreplace(top_heap, (score, vid))
-                        
-                        # Free batch memory
+
                         del batch_vecs, vec_norms, dot_products, batch_scores
 
-            # --- D. Extract Final Top K ---
-            if not top_heap: return []
-            
-            top_heap.sort(key=lambda x: x[0], reverse=True)
-            return [vid for score, vid in top_heap]
+        # --- D. Extract Final Top K ---
+        if not top_heap:
+            return []
+
+        top_heap.sort(key=lambda x: x[0], reverse=True)
+        return [(float(score), int(vid)) for score, vid in top_heap]
